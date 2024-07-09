@@ -1,0 +1,40 @@
+# Training Control
+deterministic: False
+use_compile: True
+seed: 1234
+lr: 1e-3
+max_epochs: 100
+lr_scheduler: step
+lr_decay_epochs: 10
+lr_decay_rate: 0.5
+lr_decay_min_lr: 1e-6
+
+# Distributed Training Control
+devices: 1
+num_nodes: 1
+strategy: auto
+
+# Dataset Setting
+dataset_class_name: cifar10
+dataset_dir: dataset
+split_ratios: [0.8, 0.1, 0.1]
+batch_size: 32
+num_workers: 8
+persistent_workers: True
+use_augmentation: True
+aug_prob: 0.5
+label_is_obj: False
+
+# Model Architecture, Optimizers and Loss Functions
+model_class_name: simple_net
+loss: [CrossEntropyLoss]
+loss_weight: [1.0]
+weight_decay: 1e-6
+
+# Checkpoint & Restart Control
+
+# Tensorboard Logger Setting
+log_dir: ''
+log_dir_name: 'lightning_logs'
+experiment_name: 'main'
+
