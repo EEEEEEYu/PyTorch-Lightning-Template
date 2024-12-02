@@ -22,23 +22,25 @@ import torch.nn.functional as F
 class Cifar10(data.Dataset):
     def __init__(
             self,
-            dataset_dir=None,
+            root=None,
             purpose='train',
-            aug_prob=0.5,
-            use_augmentation=True,
+            image_height=32,
+            image_width=32,
+            num_classes=10,
+            augmentation_cfg=None
     ):
         super().__init__()
         self.purpose = purpose
-        self.aug_prob = aug_prob
-        self.use_augmentation = use_augmentation
+        self.aug_prob = augmentation_cfg.get("probability")
+        self.use_augmentation = augmentation_cfg.get("enabled")
         self.augmentation = self.__configure_augmentation()
 
         if purpose == 'train':
-            self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=True, download=True)
+            self.dataset = torchvision.datasets.CIFAR10(root=root, train=True, download=True)
         elif purpose == 'validation':
-            self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=True, download=True)
+            self.dataset = torchvision.datasets.CIFAR10(root=root, train=False, download=True)
         else:
-            self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=False, download=True)
+            self.dataset = torchvision.datasets.CIFAR10(root=root, train=False, download=True)
 
     def __configure_augmentation(self):
         augmentation = transforms.Compose(
@@ -66,6 +68,6 @@ class Cifar10(data.Dataset):
         if self.use_augmentation:
             img_tensor = self.augmentation(img_tensor)
 
-        label_tensor = F.one_hot(torch.tensor(label), num_classes=10).float()
+        label_tensor = torch.tensor(label, dtype=torch.long)
 
         return img_tensor, label_tensor

@@ -1,0 +1,95 @@
+TRAINING:
+  deterministic: False
+  use_compile: False
+  inference_mode: False  # If this one is True, use inference
+  seed: 42
+  max_epochs: 50
+
+DISTRIBUTED:
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  strategy: auto
+
+DATA:
+  dataset:
+    file_name: cifar10
+    class_name: Cifar10
+    root: dataset
+    image_height: 32
+    image_width: 32
+    num_classes: 10
+    augmentation_cfg:
+      enabled: True
+      probability: 0.5
+  dataloader:
+    batch_size: 128
+    test_batch_size: 32
+    num_workers: 8
+    persistent_workers: True
+    pin_memory: True
+    multiprocessing_context: fork
+    drop_last: False
+    shuffle_train: True
+    shuffle_val: False
+    shuffle_test: False
+
+MODEL:
+  file_name: simple_net
+  class_name: SimpleNet
+  input_meta:
+    image_height: ${DATA.dataset.image_height}
+    image_width: ${DATA.dataset.image_width}
+    doubled_image_height: ${mul:${DATA.dataset.image_height}, 2}
+    doubled_image_width: ${mul:${DATA.dataset.image_width}, 2}
+    num_classes: ${DATA.dataset.num_classes}
+  blocks:
+    block1:
+      hidden_channels: [32, 64]
+    block2:
+      hidden_channels: [128, 256]
+    block3:
+      hidden_channels: [256]
+
+OPTIMIZER:
+  name: Adam
+  arguments:
+    lr: 1e-3
+    weight_decay: 1e-6  # Default L2 Regularization
+  gradient_accumulation:
+    enabled: True
+    scheduling: {0: 4, 4: 2, 8: 1}
+  gradient_clip:
+    enabled: True
+    gradient_clip_val: 1.0
+    gradient_clip_algorithm: norm # norm or value
+  stochastic_weight_averaging:
+    enabled: True
+    swa_lrs: 1e-2
+
+SCHEDULER:
+  learning_rate:      # For learning rate scheduler, check document: https://docs.pytorch.org/docs/2.8/optim.html#how-to-adjust-learning-rate
+    enabled: True
+    name: CosineAnnealingLR
+    arguments:
+      T_max: 50
+      eta_min: 1e-6
+  early_stopping:
+    enabled: True
+    monitor: val_loss_epoch
+    mode: min
+    patience: 5
+    min_delta: 1e-5
+  
+LOGGER:
+  log_dir_root: lightning_logs
+  experiment_name: simple_net_classify_v0
+
+CHECKPOINT:
+  enabled: True
+  every_n_epochs: 1
+  monitor: val_loss_epoch
+  mode: min
+  filename: "best-{epoch:03d}-{val_loss_epoch:.5f}"
+  save_top_k: 1
+  save_last: True

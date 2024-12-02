@@ -13,117 +13,216 @@
 # limitations under the License.
 
 import os
-import datetime
-
-import yaml
-import pytorch_lightning as pl
-import pytorch_lightning.callbacks as plc
-import inspect
-
+import copy
 from argparse import ArgumentParser
-from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
+from typing import Any, Dict
 
-from model import ModelInterface
-from data import DataInterface
+from omegaconf import OmegaConf
+
+OmegaConf.register_new_resolver("mul", lambda x, y: x * y)
+
+import lightning.pytorch as pl
+import lightning.pytorch.callbacks as plc
+from lightning.pytorch import Trainer
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import RichProgressBar
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
+from rich.table import Table
+
+from model_interface import ModelInterface
+from data_interface import DataInterface
+from utils.logging import get_resume_info
+from configs.config_schema import load_config_with_schema, AppConfig
+from configs.config_tracker import ConfigUsageTracker
 
 
-# For all built-in callback functions, see: https://lightning.ai/docs/pytorch/stable/api_references.html#callbacks
-# The following callback functions are commonly used and ready to load based on user setting.
-def load_callbacks():
+class MultiRowRichProgressBar(RichProgressBar):
+    def __init__(self, metrics_per_row: int = 4, refresh_rate: int = 1, leave: bool = False):
+        super().__init__(theme=RichProgressBarTheme())
+        self.metrics_per_row = metrics_per_row
+
+    def get_metrics(self, trainer, pl_module):
+        metrics = super().get_metrics(trainer, pl_module)
+        if "v_num" in metrics:
+            del metrics["v_num"]
+        return metrics
+
+    def _render_metrics_table(self, metrics: dict) -> Table:
+        table = Table(show_header=False, box=None, expand=True)
+
+        keys = list(metrics.keys())
+        for i in range(0, len(keys), self.metrics_per_row):
+            chunk_keys = keys[i: i + self.metrics_per_row]
+            row = []
+            for k in chunk_keys:
+                v = metrics[k]
+                if isinstance(v, (int, float)):
+                    row.append(f"{k}: {v:.5f}")
+                else:
+                    row.append(f"{k}: {v}")
+            table.add_row(*row)
+
+        return table
+
+    def render(self, *args, **kwargs):
+        renderables = super().render(*args, **kwargs)
+        metrics = self.get_metrics(self._trainer, self._trainer.lightning_module)
+
+        if renderables and metrics:
+            renderables[-1] = self._render_metrics_table(metrics)
+
+        return renderables
+
+
+def load_callbacks(cfg: AppConfig):
     callbacks = []
-    # Monitor a metric and stop training when it stops improving
-    callbacks.append(plc.EarlyStopping(
-        monitor='val_acc',
-        mode='max',
-        patience=10,
-        min_delta=0.001
-    ))
 
-    # Save the model periodically by monitoring a quantity
-    callbacks.append(plc.ModelCheckpoint(
-        every_n_epochs=1,
-        monitor='val_acc',
-        mode='max',
-        filename='best-{epoch:03d}-{val_acc:.3f}',
-        save_top_k=1,
-        save_last=True,
-    ))
+    callbacks.append(MultiRowRichProgressBar(refresh_rate=1, leave=False, metrics_per_row=5))
+    callbacks.append(plc.LearningRateMonitor(logging_interval='epoch'))
 
-    # Monitor learning rate decay
-    callbacks.append(plc.LearningRateMonitor(
-        logging_interval='epoch'
-    ))
+    early_stopping_cfg = cfg.SCHEDULER.early_stopping
+    if early_stopping_cfg.enabled:
+        callbacks.append(plc.EarlyStopping(
+            monitor=early_stopping_cfg.monitor,
+            mode=early_stopping_cfg.mode,
+            patience=early_stopping_cfg.patience,
+            min_delta=early_stopping_cfg.min_delta
+        ))
 
-    # Generates a summary of all layers in a LightningModule based on max_depth.
-    """
-    callbacks.append(plc.ModelSummary(
-        max_depth=1
-    ))
-    """
+    checkpoint_cfg = cfg.CHECKPOINT
+    if checkpoint_cfg.enabled:
+        callbacks.append(plc.ModelCheckpoint(
+            every_n_epochs=checkpoint_cfg.every_n_epochs,
+            monitor=checkpoint_cfg.monitor,
+            mode=checkpoint_cfg.mode,
+            filename=checkpoint_cfg.filename,
+            save_top_k=checkpoint_cfg.save_top_k,
+            save_last=checkpoint_cfg.save_last,
+        ))
 
-    # Change gradient accumulation factor according to scheduling.
-    # Only consider using this when batch_size does not fit into current hardware environment.
-    """
-    callbacks.append(plc.GradientAccumulationScheduler(
-        # From epoch 5, it starts accumulating every 4 batches. Here we have 4 instead of 5 because epoch (key) should be zero-indexed.
-        scheduling={4: 4}
-    ))
-    """
+    gradient_accumulation_scheduler_cfg = cfg.OPTIMIZER.gradient_accumulation
+    if gradient_accumulation_scheduler_cfg.enabled:
+        callbacks.append(plc.GradientAccumulationScheduler(
+            scheduling=gradient_accumulation_scheduler_cfg.scheduling
+        ))
+
+    stochastic_weight_averaging_cfg = cfg.OPTIMIZER.stochastic_weight_averaging
+    if stochastic_weight_averaging_cfg.enabled:
+        callbacks.append(plc.StochasticWeightAveraging(
+            swa_lrs=stochastic_weight_averaging_cfg.swa_lrs
+        ))
+
 
     return callbacks
 
 
-def main(config):
-    # Set random seed
-    pl.seed_everything(config['seed'])
+def _build_trainer_kwargs(cfg: AppConfig, logger: TensorBoardLogger, callbacks: list) -> Dict[str, Any]:
+    training_cfg = cfg.TRAINING
+    distributed_cfg = cfg.DISTRIBUTED
+    optimizer_cfg = cfg.OPTIMIZER
 
-    # Instantiate model and data module. Pass the arguments by unpacking the config dict.
-    data_module = DataInterface(**config)
-    model_module = ModelInterface(**config)
+    trainer_kwargs = {
+        "max_epochs": training_cfg.max_epochs,
+        "deterministic": training_cfg.deterministic,
+        "inference_mode": training_cfg.inference_mode,
+        "logger": logger,
+        "callbacks": callbacks,
+        "accelerator": distributed_cfg.accelerator,
+        "devices": distributed_cfg.devices,
+        "num_nodes": distributed_cfg.num_nodes,
+        "strategy": distributed_cfg.strategy,
+    }
 
-    # Add the tensorboard logger
-    log_dir_name_with_time = os.path.join(config['log_dir_name'], datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S"))
-    logger = TensorBoardLogger(save_dir=config['log_dir'], name=f"{log_dir_name_with_time}-{config['experiment_name']}")
-    config['logger'] = logger
+    gradient_clip_cfg = optimizer_cfg.gradient_clip
+    if gradient_clip_cfg.enabled:
+        trainer_kwargs["gradient_clip_val"] = gradient_clip_cfg.gradient_clip_val
+        trainer_kwargs["gradient_clip_algorithm"] = gradient_clip_cfg.gradient_clip_algorithm
 
-    # Load callback functions for Trainer
-    config['callbacks'] = load_callbacks()
+    return {k: v for k, v in trainer_kwargs.items() if v is not None}
 
-    # Instantiate the Trainer object
-    signature = inspect.signature(Trainer.__init__)
-    filtered_trainer_keywords = {}
-    for arg in list(signature.parameters.keys()):
-        if arg in config:
-            filtered_trainer_keywords[arg] = config[arg]
-    trainer = Trainer(**filtered_trainer_keywords)
 
-    # Launch the training
-    trainer.fit(model=model_module, datamodule=data_module)
+def main(cfg: AppConfig, tracker: ConfigUsageTracker, runtime: Dict[str, Any]):
+    runtime = copy.deepcopy(runtime)
+
+    seed = cfg.TRAINING.seed
+    pl.seed_everything(seed)
+
+    resume_info = get_resume_info(cfg, runtime)
+    mode = resume_info['mode']
+    run_name = resume_info['run_name']
+    version = resume_info['version']
+    ckpt_path = resume_info['ckpt_path']
+
+    logger = TensorBoardLogger(save_dir='.', name=run_name, version=version if mode == 'resume' else None)
+
+    model_interface_kwargs = {
+        "model_cfg": cfg.MODEL,
+        "optimizer_cfg": cfg.OPTIMIZER,
+        "scheduler_cfg": cfg.SCHEDULER,
+        "training_cfg": cfg.TRAINING,
+        "data_cfg": cfg.DATA,
+    }
+
+    data_interface_kwargs = {
+        "data_cfg": cfg.DATA
+    }
+
+    if mode == 'warmstart' and ckpt_path:
+        model_module = ModelInterface.load_from_checkpoint(
+            ckpt_path,
+            strict=bool(runtime.get('strict_state_dict', True)),
+            map_location=runtime.get('map_location', None),
+            **model_interface_kwargs,
+        )
+        ckpt_for_trainer_fit = None
+    else:
+        model_module = ModelInterface(**model_interface_kwargs)
+        ckpt_for_trainer_fit = ckpt_path if mode == 'resume' else None
+
+    data_module = DataInterface(**data_interface_kwargs)
+
+    callbacks = load_callbacks(cfg)
+    trainer_kwargs = _build_trainer_kwargs(cfg, logger, callbacks)
+    trainer = Trainer(**trainer_kwargs)
+
+    try:
+        trainer.fit(model=model_module, datamodule=data_module, ckpt_path=ckpt_for_trainer_fit)
+    finally:
+        tracker.report()
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--config_path', default=os.path.join(os.getcwd(), 'config', 'config.yaml'), type=str, required=False,
-                        help='Path of config file')
-    parser.add_argument('--dataset_dir', default=os.path.join(os.getcwd(), 'dataset'), type=str, required=False,
-                        help='Directory of dataset')
-    # Parse arguments(set attributes for sys.args using above arguments)
+    parser.add_argument('--config_path', default=os.path.join(os.getcwd(), 'config', 'config.yaml'),
+                        type=str, required=False, help='Path of config file')
+    parser.add_argument('--resume_from_last_checkpoint', action='store_true',
+                        help='Auto-find the latest run/version and resume from the newest checkpoint inside its "checkpoints" dir. '
+                             'This implies full-resume of all states, which means weights_only will be ignored')
+    parser.add_argument('--load_manual_checkpoint', default=None, type=str, required=False,
+                        help='Path to a .ckpt file to load. Combine with --weights_only to warm-start.')
+    parser.add_argument('--weights_only', action='store_true',
+                        help='Warm-start weights only (do not restore optimizer/scheduler/global_step).')
+    parser.add_argument('--strict_state_dict', action='store_true',
+                        help='If set, require exact state_dict match when warm-starting. Enabled by default.')
+    parser.add_argument('--no_strict_state_dict', dest='strict_state_dict', action='store_false',
+                        help='Disable strict state_dict matching when warm-starting.')
+    parser.add_argument('--map_location', default=None, type=str, required=False,
+                        help='Optional map_location for warm-start loading, e.g., "cpu", "cuda".')
+    parser.set_defaults(strict_state_dict=True)
+
     args = parser.parse_args()
 
-    # Validate config file and dataset directory
     if not os.path.exists(args.config_path):
         raise FileNotFoundError(f'No config file found at {args.config_path}!')
 
-    if not os.path.exists(args.dataset_dir):
-        raise FileNotFoundError(f'No dataset directory found at {args.dataset_dir}')
+    cfg_obj, cfg_tracker = load_config_with_schema(args.config_path)
 
-    # Load .yaml config file as python dict
-    with open(args.config_path) as f:
-        config_dict = yaml.safe_load(f)
+    runtime_cfg = {
+        'load_manual_checkpoint': args.load_manual_checkpoint,
+        'resume_from_last_checkpoint': args.resume_from_last_checkpoint,
+        'weights_only': getattr(args, 'weights_only', False),
+        'strict_state_dict': getattr(args, 'strict_state_dict', True),
+        'map_location': getattr(args, 'map_location', None),
+    }
 
-    # Convert config dict keys to lowercase
-    config_dict = dict([(k.lower(), v) for k, v in config_dict.items()])
-
-    # Activate main function
-    main(config_dict)
+    main(cfg_obj, cfg_tracker, runtime_cfg)

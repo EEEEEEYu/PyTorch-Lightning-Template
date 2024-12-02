@@ -1,0 +1,1 @@
+python main.py --config_path configs/config.yaml # --load_manual_checkpoint 'lightning_logs/20250820-23-56-55-simple_net_classify_v0/version_0/checkpoints/best-epoch=011-val_loss_epoch=0.58572.ckpt' --weights_only --strict_state_dict --map_location 'mps'
