@@ -19,40 +19,45 @@ class SimpleNet(nn.Module):
     def __init__(
             self,
             in_channels=3,
+            block1_hidden_channel1=32,
+            block1_hidden_channel2=64,
+            block2_hidden_channel1=128,
+            block2_hidden_channel2=256,
+            block3_hidden_channel1=256,
             num_classes=10
     ):
         super().__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.block1 = nn.Sequential(
-            nn.Conv2d(in_channels=self.in_channels, out_channels=32, kernel_size=3, padding=1, stride=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels=self.in_channels, out_channels=block1_hidden_channel1, kernel_size=3, padding=1, stride=1),
+            nn.BatchNorm2d(block1_hidden_channel1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(in_channels=block1_hidden_channel1, out_channels=block1_hidden_channel2, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(block1_hidden_channel2),
             nn.ReLU(inplace=True)
         )
 
         self.block2 = nn.Sequential(
-            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(in_channels=block1_hidden_channel2, out_channels=block2_hidden_channel1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(block2_hidden_channel1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(in_channels=block2_hidden_channel1, out_channels=block2_hidden_channel2, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(block2_hidden_channel2),
             nn.ReLU(inplace=True)
         )
 
         self.block3 = nn.Sequential(
-            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(in_channels=block2_hidden_channel2, out_channels=block3_hidden_channel1, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(block3_hidden_channel1),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d(4),
             nn.Flatten(),
-            nn.Linear(16 * 256, 4 * 256),
+            nn.Linear(16 * block3_hidden_channel1, 4 * block3_hidden_channel1),
             nn.ReLU(inplace=True),
-            nn.Linear(4 * 256, 256),
+            nn.Linear(4 * block3_hidden_channel1, block3_hidden_channel1),
             nn.ReLU(inplace=True),
-            nn.Linear(256, self.num_classes),
+            nn.Linear(block3_hidden_channel1, self.num_classes),
         )
 
     def forward(self, x):

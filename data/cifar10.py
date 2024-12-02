@@ -36,7 +36,7 @@ class Cifar10(data.Dataset):
         if purpose == 'train':
             self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=True, download=True)
         elif purpose == 'validation':
-            self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=True, download=True)
+            self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=False, download=True)
         else:
             self.dataset = torchvision.datasets.CIFAR10(root=dataset_dir, train=False, download=True)
 

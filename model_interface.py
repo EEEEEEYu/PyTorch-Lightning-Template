@@ -17,6 +17,8 @@ import torch
 import importlib
 import torch.optim.lr_scheduler as lrs
 import pytorch_lightning as pl
+
+from loss.loss_funcs import cross_entropy_loss
 from typing import Callable, Dict, Tuple
 
 
@@ -26,13 +28,28 @@ class ModelInterface(pl.LightningModule):
         self.save_hyperparameters()
         self.model = self.__load_model()
         self.loss_function = self.__configure_loss()
+        self.train_epoch_correct = 0
+        self.train_epoch_total = 0
+        self.val_epoch_correct = 0
+        self.val_epoch_total = 0
 
     def forward(self, x):
         return self.model(x)
+    
+    def on_train_epoch_end(self):
+        self.log('train_accuracy', float(self.train_epoch_correct) / float(self.train_epoch_total), on_step=False, on_epoch=True, prog_bar=True)
+        self.train_epoch_correct = 0
+        self.train_epoch_total = 0
+
+    def on_validation_epoch_end(self):
+        self.log('val_accuracy', float(self.val_epoch_correct) / float(self.val_epoch_total), on_step=False, on_epoch=True, prog_bar=True)
+        self.val_epoch_correct = 0
+        self.val_epoch_correct = 0
 
     # Caution: self.model.train() is invoked
     def training_step(self, batch, batch_idx):
         train_input, train_labels = batch
+        B = train_labels.shape[0]
         train_out = self(train_input)
         train_loss = self.loss_function(train_out, train_labels, 'train')
 
@@ -40,14 +57,17 @@ class ModelInterface(pl.LightningModule):
         out_digit = train_out.argmax(axis=1)
         correct_num = torch.sum(label_digit == out_digit).cpu().item()
 
+        self.train_epoch_correct += correct_num
+        self.train_epoch_total += B
         self.log('train_loss', train_loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('train_acc', correct_num / len(out_digit), on_step=True, on_epoch=False, prog_bar=True)
+        self.log('train_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
 
         return train_loss
 
     # Caution: self.model.eval() is invoked and this function executes within a <with torch.no_grad()> context
     def validation_step(self, batch, batch_idx):
         val_input, val_labels = batch
+        B = val_labels.shape[0]
         val_out = self(val_input)
         val_loss = self.loss_function(val_out, val_labels, 'validation')
 
@@ -55,8 +75,10 @@ class ModelInterface(pl.LightningModule):
         out_digit = val_out.argmax(axis=1)
         correct_num = torch.sum(label_digit == out_digit).cpu().item()
 
-        self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_acc', correct_num / len(out_digit), on_step=False, on_epoch=True, prog_bar=True)
+        self.train_epoch_correct += correct_num
+        self.train_epoch_total += B
+        self.log('val_loss', val_loss, on_step=True, on_epoch=False, prog_bar=True)
+        self.log('val_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
 
         return val_loss
 
@@ -64,6 +86,7 @@ class ModelInterface(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         # Same with validation_step except for the log verbose info
         test_input, test_labels = batch
+        B = test_labels.shape[0]
         test_out = self(test_input)
         test_loss = self.loss_function(test_out, test_labels, 'test')
 
@@ -71,8 +94,8 @@ class ModelInterface(pl.LightningModule):
         out_digit = test_out.argmax(axis=1)
         correct_num = torch.sum(label_digit == out_digit).cpu().item()
 
-        self.log('test_loss', test_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('test_acc', correct_num / len(out_digit), on_step=False, on_epoch=True, prog_bar=True)
+        self.log('test_loss', test_loss, on_step=True, on_epoch=False, prog_bar=True)
+        self.log('test_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
 
         return test_loss
 
@@ -114,27 +137,10 @@ class ModelInterface(pl.LightningModule):
         return sum(weighted_loss)
 
     def __configure_loss(self):
-        # Params defined loss function list
-        config_loss_funcs = [getattr(importlib.import_module('torch.nn'), name)() for name in
-                             self.hparams.loss]
-        config_loss_weight = self.hparams.loss_weight
-        config_loss_names = self.hparams.loss
-
-        assert (len(config_loss_funcs) == len(config_loss_weight)
-                and len(config_loss_funcs) == len(
-                    config_loss_names)), "Loss function num and weight/names num mismatch!"
-
-        config_loss_dict = dict(
-            [(loss_name, (loss_weight, loss_func))
-             for loss_name, loss_weight, loss_func in zip(config_loss_names, config_loss_weight, config_loss_funcs)]
-        )
-
         # User-defined function list. Recommend using `_loss` suffix in loss names.
-        user_loss_dict = {
-
+        loss_dict = {
+            'cross_entropy_loss': (1.0, cross_entropy_loss),
         }
-
-        loss_dict = {**config_loss_dict, **user_loss_dict}
 
         def loss_func(inputs, labels, stage):
             return self.__calculate_loss_and_log(
@@ -153,7 +159,7 @@ class ModelInterface(pl.LightningModule):
         # model class name as corresponding `CamelCase`.
         camel_name = ''.join([i.capitalize() for i in name.split('_')])
         try:
-            model_class = getattr(importlib.import_module('.' + name, package=__package__), camel_name)
+            model_class = getattr(importlib.import_module('model.' + name, package=__package__), camel_name)
         except Exception:
             raise ValueError(f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
         model = self.__instantiate(model_class)
