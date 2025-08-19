@@ -44,7 +44,7 @@ class ModelInterface(pl.LightningModule):
     def on_validation_epoch_end(self):
         self.log('val_accuracy', float(self.val_epoch_correct) / float(self.val_epoch_total), on_step=False, on_epoch=True, prog_bar=True)
         self.val_epoch_correct = 0
-        self.val_epoch_correct = 0
+        self.val_epoch_total = 0
 
     # Caution: self.model.train() is invoked
     def training_step(self, batch, batch_idx):
