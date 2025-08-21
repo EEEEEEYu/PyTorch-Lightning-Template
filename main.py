@@ -13,9 +13,7 @@
 # limitations under the License.
 
 import os
-import datetime
 import inspect
-import pathlib
 import yaml
 
 import lightning.pytorch as pl
@@ -30,6 +28,7 @@ from rich.table import Table
 
 from model_interface import ModelInterface
 from data_interface import DataInterface
+from utils.logging import get_resume_info
 
 
 class MultiRowRichProgressBar(RichProgressBar):
@@ -127,114 +126,97 @@ def load_callbacks(config):
     return callbacks
 
 
-def get_checkpoint_path(config):
-    # Check if resuming from a manual checkpoint or last checkpoint
-    load_manual_checkpoint = config.get('load_manual_checkpoint', None)
-    resume_from_last_checkpoint = config.get('resume_from_last_checkpoint', None)
-    checkpoint_directory = None
-    checkpoint_file_path = None
-
-    if load_manual_checkpoint:
-        # After truncating the path, PL will automatically append a new version under the parent folder(which has format: {timestamp}-{experiment name})
-        checkpoint_file_path = load_manual_checkpoint
-        truncated_path = load_manual_checkpoint
-        for i in range(2):
-            truncated_path = truncated_path[:truncated_path.rfind(os.path.sep)]
-        # Use the same logging directory as the checkpoint
-        checkpoint_directory = os.path.dirname(truncated_path)
-    # Find the latest folder with latest version
-    elif resume_from_last_checkpoint:
-        # Find the latest log folder
-        current_path = config['log_dir_root']
-        logs_with_datetime = os.listdir(config['log_dir_root'])
-        logs_with_datetime.sort(reverse=True)
-        if len(logs_with_datetime) == 0 or len(os.listdir(os.path.join(current_path, logs_with_datetime[0]))) == 0:
-            print(f"Warning: resume_from_last_checkpoint was set to True but no checkpoint found at: {current_path}. Launch a new training...")
-            return None, None
-        
-        # Find the latest version folder
-        checkpoint_directory = os.path.join(current_path, logs_with_datetime[0])
-        checkpoint_file_path = os.path.join(checkpoint_directory, 'checkpoints')
-        if not any(s.startswith('latest') and s.endswith('.ckpt') for s in os.listdir(checkpoint_file_path)):
-            print(f"Warning: resume_from_last_checkpoint was set to True but no checkpoint file found at: {checkpoint_file_path}. Launch a new training...")
-            return None, None
-
-        # Find the latest checkpoint file with largest epoch
-        ckpt_files = list(filter(lambda s: s.startswith('latest') and s.endswith('.ckpt'), os.listdir(checkpoint_file_path)))
-        ckpt_files.sort(reverse=True)
-        checkpoint_file_path = os.path.join(checkpoint_file_path, ckpt_files[0])
-
-    return checkpoint_directory, checkpoint_file_path
-
-
 def main(config):
-    # Set random seed
-    pl.seed_everything(config['seed'])        
+    pl.seed_everything(config['seed'])
 
-    checkpoint_directory, checkpoint_file_path = get_checkpoint_path(config=config) if config['enable_checkpointing'] else (None, None)
+    resume_info = get_resume_info(config)
+    mode       = resume_info['mode']
+    run_name   = resume_info['run_name']    # logger 'name'
+    version    = resume_info['version']     # logger 'version' (None → new sibling)
+    ckpt_path  = resume_info['ckpt_path']
 
-    # Caution: the final checkpoint directory depends on the logger path
-    # When the loaded checkpoint reached max_epoch, the training will stop immediately
-    if checkpoint_directory is not None:
-        logger = TensorBoardLogger(save_dir='.', name=checkpoint_directory, version=None)
-        log_dir_full = pathlib.Path(checkpoint_directory).parent
-        config['log_dir_full'] = str(log_dir_full)
+    # --- Logger placement
+    # Full-resume → log into the SAME run/version (no nested version folders)
+    # Warm-start/Scratch → SAME run name but NEW version (version=None)
+    if mode == 'resume':
+        logger = TensorBoardLogger(save_dir='.', name=run_name, version=version)
+        config['log_dir_full'] = os.path.join(run_name, version)
     else:
-        # Create a new logging directory
-        print("Training from scratch...")
-        log_dir_name_with_time = os.path.join(config['log_dir_root'], datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S"))
-        log_dir_full = f"{log_dir_name_with_time}-{config['experiment_name']}"
-        config['log_dir_full'] = log_dir_full
-        logger = TensorBoardLogger(save_dir='.', name=log_dir_full, version=None)
+        logger = TensorBoardLogger(save_dir='.', name=run_name, version=None)  # allocate version_0/1/2...
+        # We don't know the resolved version name yet; Lightning decides. Store parent for convenience.
+        config['log_dir_full'] = run_name
 
-    # Instantiate model and data module
+    weights_only = bool(config.get('weights_only', False))
+    strict_sd    = bool(config.get('strict_state_dict', True))
+    map_loc      = config.get('map_location', None)  # e.g., "cpu" or torch.device("cpu")
+    if 'weights_only' in config:
+        config.pop('weights_only')
+    if 'map_location' in config:
+        config.pop('map_location')
+    if 'strict_state_dict' in config:
+        config.pop('strict_state_dict')
+
+    if (mode == 'warmstart') and ckpt_path:
+        # Load only weights; start from epoch 0 and new global_step
+        model_module = ModelInterface.load_from_checkpoint(
+            ckpt_path, strict=strict_sd, map_location=map_loc, **config
+        )
+        ckpt_for_trainer_fit = None
+    else:
+        # Fresh module; if mode == 'resume', Trainer will restore full state via ckpt_path
+        model_module = ModelInterface(**config)
+        ckpt_for_trainer_fit = ckpt_path if (mode == 'resume') else None
+
+    # --- Data & model
     data_module = DataInterface(**config)
-    model_module = ModelInterface(**config) 
-    
-    # Add logger
-    config['logger'] = logger
 
-    # Load callback functions for Trainer
+    # --- Trainer args
+    config['logger'] = logger
     config['callbacks'] = load_callbacks(config=config)
 
-    # Add resume_from_checkpoint to the trainer initialization
     signature = inspect.signature(Trainer.__init__)
-    filtered_trainer_keywords = {}
-    for arg in list(signature.parameters.keys()):
-        if arg in config:
-            filtered_trainer_keywords[arg] = config[arg]
+    filtered_trainer_keywords = {k: config[k] for k in signature.parameters.keys() if k in config}
 
-    # Instantiate the Trainer object
     trainer = Trainer(**filtered_trainer_keywords)
 
-    # Launch the training
-    trainer.fit(model=model_module, datamodule=data_module, ckpt_path=checkpoint_file_path)
+    # Full resume → pass ckpt_path so optimizer/scheduler/global_step are restored.
+    # Warm-start/scratch → pass None so training begins fresh (but with loaded weights for warm-start).
+    trainer.fit(model=model_module, datamodule=data_module, ckpt_path=ckpt_for_trainer_fit)
 
 
 if __name__ == '__main__':
+    from argparse import ArgumentParser
     parser = ArgumentParser()
-    parser.add_argument('--config_path', default=os.path.join(os.getcwd(), 'config', 'config.yaml'), type=str, required=False,
-                        help='Path of config file')
+    parser.add_argument('--config_path', default=os.path.join(os.getcwd(), 'config', 'config.yaml'),
+                        type=str, required=False, help='Path of config file')
     parser.add_argument('--resume_from_last_checkpoint', action='store_true',
-                    help='Automatically find the log folder with latest timestamp and latest version, and load `latest-...`.ckpt model')
+                        help='Auto-find the latest run/version and resume from the newest checkpoint inside its "checkpoints" dir. ' \
+                        'This implies full-resume of all states, which means weights_only will be ignored')
     parser.add_argument('--load_manual_checkpoint', default=None, type=str, required=False,
-                    help='Manually designate the path to a checkpoint file(.ckpt) to resume training from.')
+                        help='Path to a .ckpt file to load. Combine with --weights_only to warm-start.')
+    parser.add_argument('--weights_only', action='store_true',
+                        help='Warm-start weights only (do not restore optimizer/scheduler/global_step).')
+    parser.add_argument('--strict_state_dict', action='store_true',
+                        help='If set (default True), require exact state_dict match when warm-starting.')
+    parser.add_argument('--map_location', default=None, type=str, required=False,
+                        help='Optional map_location for warm-start loading, e.g., "cpu", "cuda".')
 
-    # Parse arguments(set attributes for sys.args using above arguments)
     args = parser.parse_args()
 
-    # Validate config file and dataset directory
     if not os.path.exists(args.config_path):
         raise FileNotFoundError(f'No config file found at {args.config_path}!')
 
-    # Load .yaml config file as python dict
     with open(args.config_path) as f:
         config_dict = yaml.safe_load(f)
 
-    # Convert config dict keys to lowercase
+    # CLI overrides
     config_dict['load_manual_checkpoint'] = args.load_manual_checkpoint
     config_dict['resume_from_last_checkpoint'] = args.resume_from_last_checkpoint
-    config_dict = dict([(k.lower(), v) for k, v in config_dict.items()])
+    config_dict['weights_only'] = getattr(args, 'weights_only', False)
+    config_dict['strict_state_dict'] = getattr(args, 'strict_state_dict', True)
+    config_dict['map_location'] = getattr(args, 'map_location', None)
 
-    # Activate main function
+    # normalize keys to lowercase
+    config_dict = dict((k.lower(), v) for k, v in config_dict.items())
+
     main(config_dict)
