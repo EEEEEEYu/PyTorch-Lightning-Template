@@ -14,31 +14,66 @@
 
 import os
 import datetime
-
-import yaml
-import pytorch_lightning as pl
-import pytorch_lightning.callbacks as plc
 import inspect
+import pathlib
+import yaml
+
+import lightning.pytorch as pl
+import lightning.pytorch.callbacks as plc
 
 from argparse import ArgumentParser
-from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import TQDMProgressBar
+from lightning.pytorch import Trainer
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import RichProgressBar
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
+from rich.table import Table
 
 from model_interface import ModelInterface
 from data_interface import DataInterface
 
-class MultiRowTQDMProgressBar(TQDMProgressBar):
+
+class MultiRowRichProgressBar(RichProgressBar):
+    def __init__(self, metrics_per_row: int = 4, refresh_rate: int = 1, leave: bool = False):
+        super().__init__(theme=RichProgressBarTheme())
+        self.metrics_per_row = metrics_per_row
+
     def get_metrics(self, trainer, pl_module):
         metrics = super().get_metrics(trainer, pl_module)
-        # manually reformat as multi-line string
-        rows = []
+        if "v_num" in metrics:
+            del metrics["v_num"]
+        return metrics
+
+    def _render_metrics_table(self, metrics: dict) -> Table:
+        """
+        Format metrics into a Rich table with multiple rows.
+        """
+        table = Table(show_header=False, box=None, expand=True)
+
         keys = list(metrics.keys())
-        for i in range(0, len(keys), 5):  # 5 metrics per row
-            chunk = {k: metrics[k] for k in keys[i:i+5]}
-            row_str = " ".join(f"{k}:{v:.5f}" for k,v in chunk.items())
-            rows.append(row_str)
-        return {"metrics": "\n".join(rows)}
+        for i in range(0, len(keys), self.metrics_per_row):
+            chunk_keys = keys[i : i + self.metrics_per_row]
+            row = []
+            for k in chunk_keys:
+                v = metrics[k]
+                if isinstance(v, (int, float)):
+                    row.append(f"{k}: {v:.5f}")
+                else:
+                    row.append(f"{k}: {v}")
+            table.add_row(*row)
+
+        return table
+
+    def render(self, *args, **kwargs):
+        """
+        Override RichProgressBar.render to display metrics as multi-row table.
+        """
+        renderables = super().render(*args, **kwargs)
+        metrics = self.get_metrics(self._trainer, self._trainer.lightning_module)
+
+        if renderables and metrics:
+            renderables[-1] = self._render_metrics_table(metrics)
+
+        return renderables
 
 
 # For all built-in callback functions, see: https://lightning.ai/docs/pytorch/stable/api_references.html#callbacks
@@ -46,7 +81,7 @@ class MultiRowTQDMProgressBar(TQDMProgressBar):
 def load_callbacks(config):
     callbacks = []
 
-    callbacks.append(MultiRowTQDMProgressBar())
+    callbacks.append(MultiRowRichProgressBar(refresh_rate=1, leave=False, metrics_per_row=5))
 
     # Monitor a metric and stop training when it stops improving
     callbacks.append(plc.EarlyStopping(
@@ -110,18 +145,16 @@ def get_checkpoint_path(config):
     # Find the latest folder with latest version
     elif resume_from_last_checkpoint:
         # Find the latest log folder
-        current_path = config['log_dir']
-        log_dirs = os.listdir(config['log_dir'])
-        log_dirs.sort(reverse=True)
-        if len(log_dirs) == 0 or len(os.listdir(os.path.join(current_path, log_dirs[0]))) == 0:
+        current_path = config['log_dir_root']
+        logs_with_datetime = os.listdir(config['log_dir_root'])
+        logs_with_datetime.sort(reverse=True)
+        if len(logs_with_datetime) == 0 or len(os.listdir(os.path.join(current_path, logs_with_datetime[0]))) == 0:
             print(f"Warning: resume_from_last_checkpoint was set to True but no checkpoint found at: {current_path}. Launch a new training...")
             return None, None
         
         # Find the latest version folder
-        checkpoint_directory = os.path.join(current_path, log_dirs[0])
-        version_dirs = os.listdir(checkpoint_directory)
-        version_dirs.sort(reverse=True)
-        checkpoint_file_path = os.path.join(checkpoint_directory, version_dirs[0], 'checkpoints')
+        checkpoint_directory = os.path.join(current_path, logs_with_datetime[0])
+        checkpoint_file_path = os.path.join(checkpoint_directory, 'checkpoints')
         if not any(s.startswith('latest') and s.endswith('.ckpt') for s in os.listdir(checkpoint_file_path)):
             print(f"Warning: resume_from_last_checkpoint was set to True but no checkpoint file found at: {checkpoint_file_path}. Launch a new training...")
             return None, None
@@ -136,25 +169,29 @@ def get_checkpoint_path(config):
 
 def main(config):
     # Set random seed
-    pl.seed_everything(config['seed'])
-
-    # Instantiate model and data module
-    data_module = DataInterface(**config)
-    model_module = ModelInterface(**config)         
+    pl.seed_everything(config['seed'])        
 
     checkpoint_directory, checkpoint_file_path = get_checkpoint_path(config=config) if config['enable_checkpointing'] else (None, None)
 
     # Caution: the final checkpoint directory depends on the logger path
-    # Versions are only used for consecutive checkpointing. If a checkpoint starts from version_n, then new checkpoint directory will be version_{n+1}
-    # When the loaded checkpoint reached max_epoch, the new training will stop immediately
+    # When the loaded checkpoint reached max_epoch, the training will stop immediately
     if checkpoint_directory is not None:
-        logger = TensorBoardLogger(save_dir='.', name=checkpoint_directory)
+        logger = TensorBoardLogger(save_dir='.', name=checkpoint_directory, version=None)
+        log_dir_full = pathlib.Path(checkpoint_directory).parent
+        config['log_dir_full'] = str(log_dir_full)
     else:
         # Create a new logging directory
         print("Training from scratch...")
-        log_dir_name_with_time = os.path.join(config['log_dir'], datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S"))
-        logger = TensorBoardLogger(save_dir='.', name=f"{log_dir_name_with_time}-{config['experiment_name']}")
+        log_dir_name_with_time = os.path.join(config['log_dir_root'], datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S"))
+        log_dir_full = f"{log_dir_name_with_time}-{config['experiment_name']}"
+        config['log_dir_full'] = log_dir_full
+        logger = TensorBoardLogger(save_dir='.', name=log_dir_full, version=None)
+
+    # Instantiate model and data module
+    data_module = DataInterface(**config)
+    model_module = ModelInterface(**config) 
     
+    # Add logger
     config['logger'] = logger
 
     # Load callback functions for Trainer

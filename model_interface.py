@@ -16,8 +16,9 @@ import inspect
 import torch
 import importlib
 import torch.optim.lr_scheduler as lrs
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 
+from utils.metrics.classification import top1_accuracy, top5_accuracy
 from loss.loss_funcs import cross_entropy_loss
 from typing import Callable, Dict, Tuple
 
@@ -28,76 +29,104 @@ class ModelInterface(pl.LightningModule):
         self.save_hyperparameters()
         self.model = self.__load_model()
         self.loss_function = self.__configure_loss()
-        self.train_epoch_correct = 0
-        self.train_epoch_total = 0
-        self.val_epoch_correct = 0
-        self.val_epoch_total = 0
+        self.train_epoch_output = []
+        self.val_epoch_output = []
+        self.test_epoch_output = []
 
     def forward(self, x):
         return self.model(x)
     
+    # For all these hook functions like on_XXX_<epoch|batch>_<end|start>(), 
+    # check document: https://lightning.ai/docs/pytorch/LTS/common/lightning_module.html
+    # Epoch level training logging
     def on_train_epoch_end(self):
-        self.log('train_accuracy', float(self.train_epoch_correct) / float(self.train_epoch_total), on_step=False, on_epoch=True, prog_bar=True)
-        self.train_epoch_correct = 0
-        self.train_epoch_total = 0
+        train_top1_acc = top1_accuracy(self.train_epoch_output)
+        train_top5_acc = top5_accuracy(self.train_epoch_output)
 
+        # Metrics logging. If on_step=True, lightning will log this metric with a '_step' suffix.
+        # If on_epoch=True, lightning will by default use mean reduction to aggregate step metrics and
+        # log this metric with a '_epoch' suffix
+        self.log('train_top1_accuracy', train_top1_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('train_top5_accuracy', train_top5_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+        del self.train_epoch_output
+        self.train_epoch_output = []
+
+    # Epoch level validation logging
     def on_validation_epoch_end(self):
-        self.log('val_accuracy', float(self.val_epoch_correct) / float(self.val_epoch_total), on_step=False, on_epoch=True, prog_bar=True)
-        self.val_epoch_correct = 0
-        self.val_epoch_total = 0
+        val_top1_acc = top1_accuracy(self.val_epoch_output)
+        val_top5_acc = top5_accuracy(self.val_epoch_output)
+
+        # Metrics logging. If on_step=True, lightning will log this metric with a '_step' suffix.
+        # If on_epoch=True, lightning will by default use mean reduction to aggregate step metrics and
+        # log this metric with a '_epoch' suffix
+        self.log('val_top1_accuracy', val_top1_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_top5_accuracy', val_top5_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+        del self.val_epoch_output
+        self.val_epoch_output = []
+
+    # Epoch level testing logging
+    def on_test_epoch_end(self):
+        test_top1_acc = top1_accuracy(self.test_epoch_output)
+        test_top5_acc = top5_accuracy(self.test_epoch_output)
+
+        # Metrics logging. If on_step=True, lightning will log this metric with a '_step' suffix.
+        # If on_epoch=True, lightning will by default use mean reduction to aggregate step metrics and
+        # log this metric with a '_epoch' suffix
+        self.log('test_top1_accuracy', test_top1_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('test_top5_accuracy', test_top5_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+        del self.test_epoch_output
+        self.test_epoch_output = []
 
     # Caution: self.model.train() is invoked
     def training_step(self, batch, batch_idx):
         train_input, train_labels = batch
-        B = train_labels.shape[0]
         train_out = self(train_input)
         train_loss = self.loss_function(train_out, train_labels, 'train')
 
-        label_digit = train_labels.argmax(axis=1)
-        out_digit = train_out.argmax(axis=1)
-        correct_num = torch.sum(label_digit == out_digit).cpu().item()
+        train_step_output = {
+            'loss': train_loss,
+            'pred': train_out,
+            'ground_truth': train_labels
+        }
 
-        self.train_epoch_correct += correct_num
-        self.train_epoch_total += B
-        self.log('train_loss', train_loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('train_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
+        self.train_epoch_output.append(train_step_output)
 
-        return train_loss
+        return train_step_output
 
     # Caution: self.model.eval() is invoked and this function executes within a <with torch.no_grad()> context
     def validation_step(self, batch, batch_idx):
         val_input, val_labels = batch
-        B = val_labels.shape[0]
         val_out = self(val_input)
-        val_loss = self.loss_function(val_out, val_labels, 'validation')
+        val_loss = self.loss_function(val_out, val_labels, 'val')
 
-        label_digit = val_labels.argmax(axis=1)
-        out_digit = val_out.argmax(axis=1)
-        correct_num = torch.sum(label_digit == out_digit).cpu().item()
+        val_step_output = {
+            'loss': val_loss,
+            'pred': val_out,
+            'ground_truth': val_labels
+        }
 
-        self.train_epoch_correct += correct_num
-        self.train_epoch_total += B
-        self.log('val_loss', val_loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('val_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
+        self.val_epoch_output.append(val_step_output)
 
-        return val_loss
+        return val_step_output
 
     # Caution: self.model.eval() is invoked and this function executes within a <with torch.no_grad()> context
     def test_step(self, batch, batch_idx):
-        # Same with validation_step except for the log verbose info
         test_input, test_labels = batch
-        B = test_labels.shape[0]
         test_out = self(test_input)
         test_loss = self.loss_function(test_out, test_labels, 'test')
 
-        label_digit = test_labels.argmax(axis=1)
-        out_digit = test_out.argmax(axis=1)
-        correct_num = torch.sum(label_digit == out_digit).cpu().item()
+        test_step_output = {
+            'loss': test_loss,
+            'pred': test_out,
+            'ground_truth': test_labels
+        }
 
-        self.log('test_loss', test_loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('test_acc', float(correct_num) / float(B), on_step=True, on_epoch=False, prog_bar=True)
+        self.test_epoch_output.append(test_step_output)
 
-        return test_loss
+        return test_step_output
 
     # When there are multiple optimizers, modify this function to fit in your needs
     def configure_optimizers(self):
@@ -128,27 +157,17 @@ class ModelInterface(pl.LightningModule):
             raise ValueError('Invalid lr_scheduler type!')
         return [optimizer], [scheduler]
 
-    def __calculate_loss_and_log(self, inputs, labels, loss_dict: Dict[str, Tuple[float, Callable]], stage: str):
-        raw_loss_list = [func(inputs, labels) for _, func in loss_dict.values()]
-        weighted_loss = [weight * raw_loss for (weight, _), raw_loss in zip(loss_dict.values(), raw_loss_list)]
-        for name, raw_loss in zip(loss_dict.keys(), raw_loss_list):
-            self.log(f'{stage}_{name}', raw_loss.item(), on_step=False, on_epoch=True, prog_bar=False)
-
-        return sum(weighted_loss)
-
     def __configure_loss(self):
-        # User-defined function list. Recommend using `_loss` suffix in loss names.
-        loss_dict = {
-            'cross_entropy_loss': (1.0, cross_entropy_loss),
-        }
+        def loss_func(preds, labels, stage):
+            # Calculate and log each component individually
+            CE_loss = 1.0 * cross_entropy_loss(pred=preds, gt=labels)
+            self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        def loss_func(inputs, labels, stage):
-            return self.__calculate_loss_and_log(
-                inputs=inputs,
-                labels=labels,
-                loss_dict=loss_dict,
-                stage=stage
-            )
+            # Log the final compound loss
+            final_loss = CE_loss
+            self.log(f'{stage}_loss', final_loss, on_step=True, on_epoch=True, prog_bar=True)
+
+            return final_loss
 
         return loss_func
 

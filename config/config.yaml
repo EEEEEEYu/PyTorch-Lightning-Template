@@ -14,7 +14,7 @@ strategy: auto
 dataset_class_name: cifar10
 dataset_dir: dataset
 split_ratios: [0.8, 0.1, 0.1]
-batch_size: 32
+batch_size: 128
 test_batch_size: 32
 num_workers: 8
 persistent_workers: True
@@ -39,8 +39,8 @@ lr_decay_rate: 0.5
 lr_decay_min_lr: 1e-6
 
 ###################### Tensorboard Logger Setting #####################
-log_dir: 'lightning_logs'
-experiment_name: 'main'
+log_dir_root: 'lightning_logs'
+experiment_name: 'simple_net_classify_v0'
 
 ##################### Checkpoint & Restart Control #####################
 enable_checkpointing: True

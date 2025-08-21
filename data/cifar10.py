@@ -66,6 +66,6 @@ class Cifar10(data.Dataset):
         if self.use_augmentation:
             img_tensor = self.augmentation(img_tensor)
 
-        label_tensor = F.one_hot(torch.tensor(label), num_classes=10).float()
+        label_tensor = torch.tensor(label, dtype=torch.long)
 
         return img_tensor, label_tensor
