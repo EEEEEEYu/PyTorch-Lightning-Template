@@ -43,22 +43,22 @@ class Cifar10(data.Dataset):
             self.dataset = torchvision.datasets.CIFAR10(root=root, train=False, download=True)
 
     def __configure_augmentation(self):
-        augmentation = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.RandomHorizontalFlip(self.aug_prob),
-                transforms.RandomVerticalFlip(self.aug_prob),
-                transforms.RandomRotation(10),
-                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-            ]
-        ) if self.purpose == 'train' else transforms.Compose(
+        if self.purpose == 'train' and self.use_augmentation:
+            return transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.RandomHorizontalFlip(self.aug_prob),
+                    transforms.RandomRotation(10),
+                    transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+                ]
+            )
+
+        return transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
             ]
         )
-
-        return augmentation
 
     def __len__(self):
         return len(self.dataset)

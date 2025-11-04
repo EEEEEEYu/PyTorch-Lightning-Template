@@ -6,7 +6,7 @@ TRAINING:
   max_epochs: 50
 
 DISTRIBUTED:
-  accelerator: gpu
+  accelerator: cpu
   devices: 1
   num_nodes: 1
   strategy: auto
@@ -57,14 +57,14 @@ OPTIMIZER:
     lr: 1e-3
     weight_decay: 1e-6  # Default L2 Regularization
   gradient_accumulation:
-    enabled: True
+    enabled: False
     scheduling: {0: 4, 4: 2, 8: 1}
   gradient_clip:
-    enabled: True
+    enabled: False
     gradient_clip_val: 1.0
     gradient_clip_algorithm: norm # norm or value
   stochastic_weight_averaging:
-    enabled: True
+    enabled: False
     swa_lrs: 1e-2
 
 SCHEDULER:
@@ -75,7 +75,7 @@ SCHEDULER:
       T_max: 50
       eta_min: 1e-6
   early_stopping:
-    enabled: True
+    enabled: False
     monitor: val_loss_epoch
     mode: min
     patience: 5
