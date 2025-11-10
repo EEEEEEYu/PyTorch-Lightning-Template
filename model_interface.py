@@ -66,8 +66,8 @@ class ModelInterface(pl.LightningModule):
         train_out_logits = self(train_input)
         train_loss = self.loss_function(train_out_logits, train_labels, 'train')
 
-        train_step_top1_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, top_k=1)
-        train_step_top5_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, top_k=5)
+        train_step_top1_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=1)
+        train_step_top5_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=5)
         self.log('train_top1_acc', value=train_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=train_input.shape[0])
         self.log('train_top5_acc', value=train_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=train_input.shape[0])
 
@@ -84,8 +84,8 @@ class ModelInterface(pl.LightningModule):
         val_input, val_labels = batch
         val_out_logits = self(val_input)
         val_loss = self.loss_function(val_out_logits, val_labels, 'val')
-        val_step_top1_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, top_k=1)
-        val_step_top5_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, top_k=5)
+        val_step_top1_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, average='micro', top_k=1)
+        val_step_top5_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, average='micro', top_k=5)
         self.log('val_top1_acc', value=val_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=val_input.shape[0])
         self.log('val_top5_acc', value=val_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=val_input.shape[0])
 
@@ -102,8 +102,8 @@ class ModelInterface(pl.LightningModule):
         test_input, test_labels = batch
         test_out_logits = self(test_input)
         test_loss = self.loss_function(test_out_logits, test_labels, 'test')
-        test_step_top1_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, top_k=1)
-        test_step_top5_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, top_k=5)
+        test_step_top1_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, average='micro', top_k=1)
+        test_step_top5_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, average='micro', top_k=5)
         self.log('test_top1_acc', value=test_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=test_input.shape[0])
         self.log('test_top5_acc', value=test_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=test_input.shape[0])
 
